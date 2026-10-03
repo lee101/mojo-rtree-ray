@@ -1,6 +1,6 @@
 # Mojo dialect notes (verified by probe against the pinned compiler, not by docs)
 
-Toolchain these notes describe: `mojo ==1.2.0.dev2026092605` (set in `MOJO_PIN` in
+Toolchain these notes describe: `mojo ==1.2.0.dev2026092905` (set in `MOJO_PIN` in
 `bin/port.sh`; every repo receives this file with the marker already substituted).
 Every claim below was checked by compiling it. `bin/probe-confirm.py` and
 `bin/probe-hints.py` in the factory regenerate the list; re-run them after any
@@ -144,8 +144,8 @@ pin; it is released in lockstep, so `mojo ==X` goes with `max ==matching-version
 
 ```toml
 [dependencies]
-mojo = "==1.2.0.dev2026092605"
-max  = "==26.7.0.dev2026092605"
+mojo = "==1.2.0.dev2026092905"
+max  = "==26.7.0.dev2026092905"
 ```
 
 **`parallelize` signature changed.** The bracket form no longer type-checks:
@@ -192,3 +192,55 @@ def _p() -> Int:
     return simd_width_of[DType.float64]()   # -> "did you mean to import it from 'std.sys'?"
 ```
 No hint means the symbol is gone, not relocated. `bin/probe-hints.py` automates this.
+
+## 8. Structs and reserved words, verified on mojo-rtree-ray
+
+- **A `struct` needs `def __init__(out self, ...)`.** Writing the field
+  initialiser implicitly (`def __init__(self, x: T):`) gives
+  `__init__ method must return Self type with 'out' argument`, and omitting
+  `__init__` entirely makes every positional construction
+  `invalid initialization: missing required argument: 'move'`. So:
+  ```mojo
+  struct Vec3:
+      var x: Float64
+      def __init__(out self, x: Float64):
+          self.x = x
+  ```
+- **Operators are methods, not module-level functions.** A file-scope
+  `def __sub__(a, b)` compiles but never registers; the `a - b` site then
+  reports `'Vec3' does not implement the '__sub__' method`. It has to be a
+  method on the struct.
+- **`{imm}` is only valid on a nested `def`.** A top-level
+  `def helper() {imm}:` is a parse error (`expected ':' in function
+  definition`). Nested, it is what lets the def capture without the
+  "could not infer capture convention" error.
+- **`out` is a reserved word** and cannot be a parameter name:
+  `expected argument name`.
+- **`load`/`store` and `ptr + n` are deprecated** in favour of
+  `unsafe_load`/`unsafe_store` and `ptr.unsafe_offset(n)`. All three still
+  compile, with a warning; the kernels here emitted 44 warnings and zero
+  after the switch. Warnings are the only signal, so grep the build output.
+- **`parallelize(work, n, workers)` is the live call form** and a nested
+  `{imm}` def capturing several `Pointer` arguments works under it. Gate it on
+  a pair-count threshold: below it the serial loop is faster, and the two paths
+  are byte-identical in output order.
+
+## 9. Pinning `mojo` and `max` together
+
+`max` ships in lockstep with `mojo`, and the dates are part of the version:
+`mojo ==1.2.0.dev2026092905` pairs with `max ==26.7.0.dev2026092905`. Bumping one
+without the other fails at solve time, not at build time, and the message
+buries the real cause under a chain of "no viable options":
+
+```
+max 26.7.0.dev2026092605 cannot be installed because there are no viable options:
+  └─ max-core 26.7.0.dev2026092605 would require
+     └─ mojo-compiler ==1.2.0.dev2026092605, which cannot be installed ...
+```
+
+To find the matching build, read the channel's repodata (it 301s, so follow it):
+
+```bash
+curl -sL "https://conda.modular.com/max-nightly/linux-64/repodata.json"
+# then look for max / max-core / mojo-compiler entries sharing the date suffix
+```
